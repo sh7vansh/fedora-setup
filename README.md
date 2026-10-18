@@ -14,11 +14,10 @@ rebuilds modules when needed, and stops on errors.
 
 ### NVIDIA Secure Boot
 
-Use an interactive terminal. If enrollment is needed, choose a temporary password
-at the `mokutil` prompt (typed characters stay hidden). Reboot, select
-**Enroll MOK → Continue → Yes**, enter that password, and reboot again.
-Existing keys and pending enrollment requests are reused. After reboot, check
-the driver with `nvidia-smi`.
+1. If prompted, choose a temporary password (typing stays hidden).
+2. Reboot and select **Enroll MOK → Continue → Yes**.
+3. Enter the same password, then reboot again.
+4. Once Fedora starts, run `nvidia-smi` to check the driver.
 
 ### Checks
 
