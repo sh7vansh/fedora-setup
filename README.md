@@ -14,6 +14,6 @@ curl -fsSL https://raw.githubusercontent.com/sh7vansh/fedora-setup/main/fedora-s
 - Replaces restricted `ffmpeg-free` with full **FFmpeg** (`--allowerasing`)
 - Upgrades **`@multimedia`** group (GStreamer plugins, aptX Bluetooth audio)
 - Auto-detects GPU and configures hardware acceleration:
-  - **NVIDIA:** `akmod-nvidia` + CUDA
+  - **NVIDIA:** `akmod-nvidia` + CUDA (verifies akmods build & checks Secure Boot)
   - **AMD:** `mesa-va-drivers-freeworld`
   - **Intel:** `intel-media-driver` (QuickSync)
