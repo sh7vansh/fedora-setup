@@ -18,12 +18,12 @@ It equips stock Fedora with the essentials that can't ship out-of-the-box due to
 
 ### Quick Run (via curl)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<username>/fedora-setup/main/fedora-setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sh7vansh/fedora-setup/main/fedora-setup.sh | bash
 ```
 
 ### Local Run
 ```bash
-git clone https://github.com/<username>/fedora-setup.git
+git clone https://github.com/sh7vansh/fedora-setup.git
 cd fedora-setup
 ./fedora-setup.sh
 ```
