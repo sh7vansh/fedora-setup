@@ -56,12 +56,9 @@ if lspci | grep -qi nvidia; then
         if [ -f /etc/pki/akmods/certs/public_key.der ] && sudo mokutil --test-key /etc/pki/akmods/certs/public_key.der 2>&1 | grep -qi "already enrolled"; then
             ok "Secure Boot: MOK key already enrolled"
         else
-            echo -e "\n    ${YELLOW}${BOLD}Secure Boot Action Required:${RESET}"
-            echo -e "    ${DIM}To allow NVIDIA drivers to load with Secure Boot, enroll the MOK key:${RESET}"
-            echo -e "    ${BOLD}sudo mokutil --import /etc/pki/akmods/certs/public_key.der${RESET}"
-            echo -e "    ${DIM}1. Create a temporary password when prompted.${RESET}"
-            echo -e "    ${DIM}2. Reboot your PC (the blue 'MOKManagement' screen will show).${RESET}"
-            echo -e "    ${DIM}3. Select: Enroll MOK ➔ Continue ➔ Yes ➔ Enter password.${RESET}\n"
+            sub "Secure Boot enabled: enroll the MOK key to load NVIDIA:"
+            echo -e "      ${BOLD}sudo mokutil --import /etc/pki/akmods/certs/public_key.der${RESET}"
+            sub "Select 'Enroll MOK' on next reboot."
         fi
     fi
 fi
