@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 # --- Colors & Symbols ---
 if [ -t 1 ]; then
@@ -17,6 +17,22 @@ log()  { echo -e "  ${BLUE}●${RESET} $1"; }
 ok()   { echo -e "  ${GREEN}✓${RESET} $1"; }
 warn() { echo -e "  ${YELLOW}⚠${RESET} $1"; }
 sub()  { echo -e "    ${DIM}↳${RESET} $1"; }
+die()  { warn "$1" >&2; exit 1; }
+
+normalize_hex() { tr -d '[:space:]:' | tr '[:lower:]' '[:upper:]'; }
+
+nvidia_modules_match_key() {
+    local module module_key
+    for module in nvidia nvidia_modeset nvidia_drm nvidia_uvm; do
+        module_key=$(modinfo -k "$target_kernel" -F sig_key "$module" 2>/dev/null) || return 1
+        module_key=$(printf '%s' "$module_key" | normalize_hex)
+        [[ -n "$module_key" && "$module_key" == "$signing_key_id" ]] || return 1
+    done
+}
+
+trap 'warn "Setup failed at line ${LINENO}; see the error above." >&2' ERR
+needs_mok_enrollment=false
+nvidia_installed=false
 
 echo -e "\n${BOLD}fedora-setup${RESET} ${DIM}— setup codecs & drivers${RESET}\n"
 
@@ -27,56 +43,130 @@ sudo -v
 log "Enabling RPM Fusion..."
 sudo dnf install -y \
   https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
-  https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm > /dev/null 2>&1
+  https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
 ok "RPM Fusion active"
 
-# 2. Codecs (Swap restricted FFmpeg + Group Upgrade)
-log "Swapping to full FFmpeg & upgrading multimedia..."
-sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing > /dev/null 2>&1
-sudo dnf group upgrade --with-optional -y multimedia > /dev/null 2>&1
+# 2. Codecs (Swap restricted FFmpeg + install missing group packages)
+log "Installing full FFmpeg & multimedia..."
+if rpm -q ffmpeg-free >/dev/null 2>&1; then
+    sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing
+else
+    sudo dnf install -y ffmpeg
+fi
+sudo dnf group install --with-optional -y multimedia
 ok "Full FFmpeg & multimedia codecs ready"
 
 # 3. Hardware Acceleration
 log "Configuring hardware acceleration..."
+if ! command -v lspci >/dev/null 2>&1; then
+    sudo dnf install -y pciutils
+fi
+# Capture once so grep's early exit cannot cause SIGPIPE with pipefail.
+gpu_info=$(LC_ALL=C lspci)
 
 # NVIDIA
-if lspci | grep -qi nvidia; then
+if grep -qiE '(vga|3d|display).*nvidia' <<< "$gpu_info"; then
     sub "Detected: NVIDIA GPU"
-    sudo dnf install -y akmod-nvidia xorg-x11-drv-nvidia-cuda kmodtool > /dev/null 2>&1
-
-    sub "Building kernel module via akmods (this may take ~1-2 min)..."
-    if sudo akmods --force > /dev/null 2>&1; then
-        ok "NVIDIA kernel module built successfully"
-    else
-        warn "akmods build encountered an issue (check /var/log/akmods/akmods.log)"
+    sudo dnf install -y kmodtool akmods mokutil openssl
+    # Respect the same signing configuration as kmodtool, including overrides.
+    signing_cert=$(rpm --eval '%{__kmodtool_signmodules_pubkey}')
+    signing_private_key=$(rpm --eval '%{__kmodtool_signmodules_privkey}')
+    signing_enabled=$(rpm --eval '%{__kmodtool_signmodules}')
+    [[ "$signing_enabled" == 1 ]] || die "Module signing is disabled in the kmodtool configuration."
+    if ! sudo test -f "$signing_cert" || ! sudo test -f "$signing_private_key"; then
+        [[ "$signing_cert" == /etc/pki/akmods/certs/public_key.der &&
+           "$signing_private_key" == /etc/pki/akmods/private/private_key.priv ]] ||
+            die "Configured signing key files are missing; repair the kmodtool configuration first."
+        sudo kmodgenca -a
     fi
+    # Validate both files and compare their public keys without printing private data.
+    cert_public_key=$(sudo openssl x509 -inform DER -in "$signing_cert" -pubkey -noout)
+    private_public_key=$(sudo openssl pkey -in "$signing_private_key" -passin pass: -pubout)
+    [[ "$cert_public_key" == "$private_public_key" ]] || die "The signing certificate and private key do not match."
+    signing_key_id=$(sudo openssl x509 -inform DER -in "$signing_cert" -noout -ext subjectKeyIdentifier |
+        sed '1d' | normalize_hex)
+    [[ "$signing_key_id" =~ ^[0-9A-F]+$ ]] || die "The signing certificate has no usable subject key identifier."
+    target_kernel=$(uname -r)
+    sudo dnf install -y akmod-nvidia xorg-x11-drv-nvidia-cuda
+
+    sub "Building NVIDIA modules (this may take several minutes)..."
+    sudo akmods --force --akmod nvidia
+    if ! nvidia_modules_match_key; then
+        sub "Rebuilding modules for $target_kernel with the configured signing key..."
+        sudo akmods --force --rebuild --akmod nvidia --kernels "$target_kernel"
+    fi
+    nvidia_modules_match_key || die "NVIDIA modules are missing or signed with a different key; check /var/log/akmods/akmods.log."
+    nvidia_installed=true
+    ok "NVIDIA modules for $target_kernel match the signing certificate"
 
     # Secure Boot Check & Guidance
-    if mokutil --sb-state 2>/dev/null | grep -qi "enabled"; then
-        if [ -f /etc/pki/akmods/certs/public_key.der ] && sudo mokutil --test-key /etc/pki/akmods/certs/public_key.der 2>&1 | grep -qi "already enrolled"; then
+    if [ -d /sys/firmware/efi ]; then
+        secure_boot_state=$(LC_ALL=C mokutil --sb-state)
+    else
+        secure_boot_state="Legacy BIOS"
+    fi
+    if grep -qi "enabled" <<< "$secure_boot_state"; then
+        cert_fingerprint=$(sudo openssl x509 -inform DER -in "$signing_cert" -noout -sha1 -fingerprint)
+        cert_fingerprint=$(printf '%s' "${cert_fingerprint#*=}" | normalize_hex)
+        [[ "$cert_fingerprint" =~ ^[0-9A-F]{40}$ ]] || die "Cannot read the signing certificate fingerprint."
+        # Query failures must stop setup, rather than look like missing enrollment.
+        enrolled_keys=$(LC_ALL=C sudo mokutil --list-enrolled)
+        enrolled_keys=$(printf '%s' "$enrolled_keys" | normalize_hex)
+        if [[ "$enrolled_keys" == *"$cert_fingerprint"* ]]; then
             ok "Secure Boot: MOK key already enrolled"
         else
-            sub "Secure Boot enabled: enroll the MOK key to load NVIDIA:"
-            echo -e "      ${BOLD}sudo mokutil --import /etc/pki/akmods/certs/public_key.der${RESET}"
-            sub "Select 'Enroll MOK' on next reboot."
+            needs_mok_enrollment=true
+            pending_keys=$(LC_ALL=C sudo mokutil --list-new)
+            pending_keys=$(printf '%s' "$pending_keys" | normalize_hex)
+            if [[ "$pending_keys" == *"$cert_fingerprint"* ]]; then
+                sub "MOK enrollment is already queued; use the password set during import after reboot."
+            else
+                sub "Choose a temporary MOK password now; enter it again after reboot."
+                sub "This password authorizes enrollment; it is separate from your sudo password."
+                # Read from the terminal even when launched through curl | bash.
+                if ! (exec </dev/tty) 2>/dev/null; then
+                    warn "No interactive terminal; MOK enrollment has not been queued."
+                    printf '      Run: sudo mokutil --import %q\n' "$signing_cert"
+                    exit 1
+                fi
+                sudo mokutil --import "$signing_cert" </dev/tty
+                pending_keys=$(LC_ALL=C sudo mokutil --list-new)
+                pending_keys=$(printf '%s' "$pending_keys" | normalize_hex)
+                [[ "$pending_keys" == *"$cert_fingerprint"* ]] || die "The signing key was not queued for enrollment."
+                ok "MOK enrollment queued"
+            fi
         fi
     fi
 fi
 
 # AMD
-if lspci | grep -qi -E "vga.*amd|display.*amd|vga.*ati|display.*ati"; then
+if grep -qiE '(vga|3d|display).*(amd|ati)' <<< "$gpu_info"; then
     sub "Detected: AMD GPU"
-    sudo dnf swap -y mesa-va-drivers mesa-va-drivers-freeworld > /dev/null 2>&1 || true
-    sudo dnf swap -y mesa-vdpau-drivers mesa-vdpau-drivers-freeworld > /dev/null 2>&1 || true
+    if rpm -q mesa-va-drivers-freeworld >/dev/null 2>&1; then
+        sudo dnf install -y mesa-va-drivers-freeworld
+    elif rpm -q mesa-va-drivers >/dev/null 2>&1; then
+        sudo dnf swap -y mesa-va-drivers mesa-va-drivers-freeworld
+    else
+        sudo dnf install -y mesa-va-drivers-freeworld
+    fi
     ok "AMD freeworld video drivers installed"
 fi
 
 # Intel
-if lspci | grep -qi -E "vga.*intel|display.*intel"; then
+if grep -qiE '(vga|3d|display).*intel' <<< "$gpu_info"; then
     sub "Detected: Intel GPU"
-    sudo dnf install -y intel-media-driver libva-intel-driver > /dev/null 2>&1
+    sudo dnf install -y intel-media-driver libva-intel-driver
     ok "Intel QuickSync media drivers installed"
 fi
 
 # --- Done ---
-echo -e "\n${GREEN}${BOLD}✓ Setup complete.${RESET} ${DIM}Reboot your system to apply.${RESET}\n"
+if "$needs_mok_enrollment"; then
+    warn "Packages installed; NVIDIA still requires MOK enrollment."
+    sub "Reboot to finish the queued enrollment."
+    sub "Choose 'Enroll MOK' and enter the password you set during import."
+else
+    echo -e "\n${GREEN}${BOLD}✓ Setup complete.${RESET} ${DIM}Reboot your system to apply.${RESET}\n"
+fi
+if "$nvidia_installed"; then
+    sub "After reboot, run nvidia-smi to verify the running NVIDIA driver."
+fi
