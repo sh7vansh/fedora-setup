@@ -59,7 +59,8 @@ log "Installing full FFmpeg & multimedia..."
 if rpm -q ffmpeg-free >/dev/null 2>&1; then
     sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing
 else
-    sudo dnf install -y ffmpeg
+    # Fedora's libav*-free libraries can exist without the ffmpeg-free CLI.
+    sudo dnf install -y ffmpeg --allowerasing
 fi
 sudo dnf group install --with-optional -y multimedia
 ok "Full FFmpeg & multimedia codecs ready"
