@@ -21,6 +21,11 @@ die()  { warn "$1" >&2; exit 1; }
 
 normalize_hex() { tr -d '[:space:]:' | tr '[:lower:]' '[:upper:]'; }
 
+gpu_devices_for_vendor() {
+    # Numeric display class and vendor IDs do not depend on pci.ids vendor names.
+    grep -iE "\\[03[[:xdigit:]]{2}\\]:.*\\[$1:[[:xdigit:]]{4}\\]" <<< "$gpu_info"
+}
+
 nvidia_modules_match_key() {
     local module module_key
     for module in nvidia nvidia_modeset nvidia_drm nvidia_uvm; do
@@ -62,11 +67,26 @@ if ! command -v lspci >/dev/null 2>&1; then
     sudo dnf install -y pciutils
 fi
 # Capture once so grep's early exit cannot cause SIGPIPE with pipefail.
-gpu_info=$(LC_ALL=C lspci)
+gpu_info=$(LC_ALL=C lspci -Dnn)
 
 # NVIDIA
-if grep -qiE '(vga|3d|display).*nvidia' <<< "$gpu_info"; then
+if nvidia_gpus=$(gpu_devices_for_vendor 10de); then
     sub "Detected: NVIDIA GPU"
+    # Current drivers require Turing or newer. Fail closed when the local
+    # pci.ids database cannot identify a known supported architecture, too.
+    # Check every GPU: a supported card must not hide an older second card.
+    while IFS= read -r gpu; do
+        if ! grep -qE '[[:space:]](TU|GA|AD|GH|GB)[0-9]{3}[[:alnum:]]*([[:space:]]|$)' <<< "$gpu"; then
+            warn "Cannot confirm current NVIDIA driver support for: $gpu"
+            die "NVIDIA driver installation stopped. Older GPUs need a compatible legacy branch; check https://rpmfusion.org/Howto/NVIDIA. For an unrecognized GPU, update pci.ids and verify driver support first."
+        fi
+    done <<< "$nvidia_gpus"
+    target_kernel=$(uname -r)
+    # akmods dependencies may only pull development files for a newer kernel.
+    # Resolve the exact kernel capability (also covers Fedora kernel variants).
+    if ! sudo dnf install -y "kernel-devel-uname-r = $target_kernel"; then
+        die "Cannot install development files for $target_kernel. Update Fedora, reboot into the updated kernel, then rerun setup."
+    fi
     sudo dnf install -y kmodtool akmods mokutil openssl
     # Respect the same signing configuration as kmodtool, including overrides.
     signing_cert=$(rpm --eval '%{__kmodtool_signmodules_pubkey}')
@@ -86,7 +106,6 @@ if grep -qiE '(vga|3d|display).*nvidia' <<< "$gpu_info"; then
     signing_key_id=$(sudo openssl x509 -inform DER -in "$signing_cert" -noout -ext subjectKeyIdentifier |
         sed '1d' | normalize_hex)
     [[ "$signing_key_id" =~ ^[0-9A-F]+$ ]] || die "The signing certificate has no usable subject key identifier."
-    target_kernel=$(uname -r)
     sudo dnf install -y akmod-nvidia xorg-x11-drv-nvidia-cuda
 
     sub "Building NVIDIA modules (this may take several minutes)..."
@@ -140,7 +159,7 @@ if grep -qiE '(vga|3d|display).*nvidia' <<< "$gpu_info"; then
 fi
 
 # AMD
-if grep -qiE '(vga|3d|display).*(amd|ati)' <<< "$gpu_info"; then
+if gpu_devices_for_vendor 1002 >/dev/null; then
     sub "Detected: AMD GPU"
     if rpm -q mesa-va-drivers-freeworld >/dev/null 2>&1; then
         sudo dnf install -y mesa-va-drivers-freeworld
@@ -153,7 +172,7 @@ if grep -qiE '(vga|3d|display).*(amd|ati)' <<< "$gpu_info"; then
 fi
 
 # Intel
-if grep -qiE '(vga|3d|display).*intel' <<< "$gpu_info"; then
+if gpu_devices_for_vendor 8086 >/dev/null; then
     sub "Detected: Intel GPU"
     sudo dnf install -y intel-media-driver libva-intel-driver
     ok "Intel QuickSync media drivers installed"
