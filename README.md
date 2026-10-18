@@ -9,12 +9,12 @@ curl -fsSL https://raw.githubusercontent.com/sh7vansh/fedora-setup/main/fedora-s
 ```
 
 Enables RPM Fusion, installs full FFmpeg and multimedia packages, and detects
-NVIDIA, AMD, or Intel GPUs to install drivers. Checks NVIDIA signing keys,
-rebuilds modules when needed, and stops on errors.
+NVIDIA, AMD, or Intel GPUs to install drivers. Stops on package installation errors.
 
-### NVIDIA Secure Boot
+### NVIDIA setup
 
-1. If prompted, choose a temporary password (typing stays hidden).
-2. Reboot and select **Enroll MOK → Continue → Yes**.
-3. Enter the same password, then reboot again.
+1. The script opens the NVIDIA driver page in **Software** and exits.
+2. If **Enable…** appears, click it and follow Software's instructions for Secure
+   Boot and MOK enrollment.
+3. Let driver installation finish, then reboot as directed.
 4. Once Fedora starts, run `nvidia-smi` to check the driver.
