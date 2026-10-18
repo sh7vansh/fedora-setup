@@ -41,8 +41,11 @@ nvidia_installed=false
 
 echo -e "\n${BOLD}fedora-setup${RESET} ${DIM}— setup codecs & drivers${RESET}\n"
 
-# Ensure sudo credentials are ready
+# Ensure sudo credentials are ready and keep them refreshed in the background
 sudo -v
+while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
+sudo_keepalive_pid=$!
+trap 'kill "$sudo_keepalive_pid" 2>/dev/null || true' EXIT
 
 # 1. Repositories
 log "Enabling RPM Fusion..."
